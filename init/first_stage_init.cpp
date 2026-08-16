@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -39,10 +40,12 @@
 #include <android-base/stringify.h>
 #include <android-base/stringprintf.h>
 #include <android/avf_cc_flags.h>
+#include <bootloader_message/bootloader_message.h>
 #include <fs_mgr.h>
 #include <modprobe/modprobe.h>
 #include <private/android_filesystem_config.h>
 
+#include "block_dev_initializer.h"
 #include "debug_ramdisk.h"
 #include "first_stage_console.h"
 #include "first_stage_mount.h"
@@ -114,8 +117,41 @@ void FreeRamdisk(DIR* dir, dev_t dev) {
 }
 
 bool ForceNormalBoot(const std::string& cmdline, const std::string& bootconfig) {
-    return bootconfig.find("androidboot.force_normal_boot = \"1\"") != std::string::npos ||
-           cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
+    if (bootconfig.find("androidboot.force_normal_boot = \"1\"") != std::string::npos ||
+        cmdline.find("androidboot.force_normal_boot=1") != std::string::npos) {
+        return true;
+    }
+
+    const bool recovery_mode_from_misc =
+            bootconfig.find("androidboot.recovery_mode_from_misc = \"1\"") != std::string::npos ||
+            cmdline.find("androidboot.recovery_mode_from_misc=1") != std::string::npos;
+    if (!recovery_mode_from_misc) {
+        return false;
+    }
+
+    static int force_normal_boot = -1;
+    if (force_normal_boot != -1) {
+        return force_normal_boot;
+    }
+
+    BlockDevInitializer block_dev_init;
+    if (!block_dev_init.InitDevices({"misc"})) {
+        LOG(ERROR) << "Failed to initialize misc partition for boot mode detection";
+        force_normal_boot = 0;
+        return false;
+    }
+
+    bootloader_message boot = {};
+    std::string error;
+    if (!read_bootloader_message_from(&boot, "/dev/block/by-name/misc", &error)) {
+        LOG(ERROR) << "Failed to read bootloader message for boot mode detection: " << error;
+        force_normal_boot = 0;
+        return false;
+    }
+
+    force_normal_boot = std::strncmp(boot.command, "boot-recovery", sizeof("boot-recovery")) != 0;
+    LOG(INFO) << "Boot mode selected from misc: " << (force_normal_boot ? "normal" : "recovery");
+    return force_normal_boot;
 }
 
 static void Copy(const char* src, const char* dst) {
