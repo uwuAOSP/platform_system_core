@@ -557,6 +557,18 @@ void BatteryMonitor::updateValues(void) {
         ensureBatteryHealthData(mHealthInfo.get())->batteryVoltageMinDesignUv = *res;
     }
 
+    // Reconcile charger discovery on every update.
+    // A transient unknown type or missed event must not hide a charger indefinitely.
+    std::unique_ptr<DIR, decltype(&closedir)> chargerDir(
+            opendir(POWER_SUPPLY_SYSFS_PATH), closedir);
+    if (chargerDir != nullptr) {
+        while (struct dirent* entry = readdir(chargerDir.get())) {
+            const char* name = entry->d_name;
+            if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+            updateChargerPresence(name);
+        }
+    }
+
     double MaxPower = 0;
 
     for (const auto& chargerName : mChargerNames) {
